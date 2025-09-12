@@ -1,0 +1,54 @@
+# Virtual environments
+venv_adv/
+venv/
+env/
+.env
+
+# Backup files
+*backup*
+
+# Model checkpoints and weights (heavy files)
+pretrained_models/*.pt
+pretrained_models/*.pth
+pretrained_models/*.bin
+pretrained_models/*.safetensors
+models/*/checkpoints/
+*.ckpt
+
+# Generated outputs
+images/
+outputs/
+results/
+logs/
+plots/
+
+# Cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+.pytest_cache/
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Jupyter notebooks
+.ipynb_checkpoints/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Large datasets
+data/
+datasets/

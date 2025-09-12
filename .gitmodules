@@ -1,0 +1,6 @@
+[submodule "models/LlamaGen"]
+	path = models/LlamaGen
+	url = https://github.com/FoundationVision/LlamaGen.git
+[submodule "models/anole"]
+	path = models/anole
+	url = https://github.com/GAIR-NLP/anole.git
