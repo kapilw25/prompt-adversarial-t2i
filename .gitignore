@@ -16,11 +16,11 @@ models/*/checkpoints/
 *.ckpt
 
 # Generated outputs
-images/
-outputs/
-results/
-logs/
-plots/
+# images/
+# outputs/
+# results/
+# logs/
+# plots/
 
 # Cache files
 __pycache__/
@@ -32,9 +32,9 @@ __pycache__/
 .pytest_cache/
 
 # Database files
-*.db
-*.sqlite
-*.sqlite3
+# *.db
+# *.sqlite
+# *.sqlite3
 
 # Jupyter notebooks
 .ipynb_checkpoints/
@@ -52,3 +52,6 @@ Thumbs.db
 # Large datasets
 data/
 datasets/
+
+# test files
+*test*
