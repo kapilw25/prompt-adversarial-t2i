@@ -276,6 +276,7 @@ class BlackBoxAttacker:
             return "social_engineering"
         elif any(phrase in prompt_lower for phrase in ["fictional", "movie", "game"]):
             return "context_manipulation"
+    
     def random_search(self, initial_prompt: str, target_text: str, max_iterations: int = 50, attack_name: str = "blackbox") -> Dict:
         """
         Perform random search optimization.
