@@ -15,8 +15,12 @@ from torchvision.utils import save_image
 import os
 import sys
 import time
+import traceback
 from PIL import Image
 import numpy as np
+
+# Import centralized database
+from centralized_db import CentralizedDB
 
 # Add LlamaGen modules to path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'models', 'LlamaGen'))
@@ -170,7 +174,6 @@ class LlamaGenInference:
             
         except Exception as e:
             print(f"Error loading models: {e}")
-            import traceback
             traceback.print_exc()
             return False
     
@@ -266,15 +269,50 @@ class LlamaGenInference:
                 
         except Exception as e:
             print(f"Error during generation: {e}")
-            import traceback
             traceback.print_exc()
             return None
 
 def main():
     """Demo script for LlamaGen text-to-image generation"""
-    # Initialize LlamaGen (700M recommended for RTX 2080 Ti)
-    generator = LlamaGenInference(model_size="700M")
+    # Initialize centralized database
+    db = CentralizedDB()
+
+    # Test prompts for adversarial research
+    test_prompts = [
+        "a cat sitting on a red chair",
+        "a beautiful sunset over mountains",
+        "a futuristic cityscape at night",
+        "a portrait photo of a kangaroo wearing an orange hoodie"
+    ]
+
+    # Check which prompts need processing BEFORE loading models
+    import sqlite3
+    conn = sqlite3.connect(db.db_path)
+    cursor = conn.cursor()
     
+    prompts_to_process = []
+    for prompt in test_prompts:
+        cursor.execute("SELECT id FROM step1_inference WHERE prompt_text = ?", (prompt,))
+        existing = cursor.fetchone()
+        
+        if existing:
+            response = input(f"Prompt '{prompt}' already exists. Replace? [yes/No]: ").strip().lower()
+            if response in ['yes', 'y']:
+                prompts_to_process.append(prompt)
+            else:
+                print("Skipping prompt...")
+        else:
+            prompts_to_process.append(prompt)
+    
+    conn.close()
+    
+    if not prompts_to_process:
+        print("No prompts to process. Exiting...")
+        return
+
+    # Initialize LlamaGen only if needed (700M recommended for RTX 2080 Ti)
+    generator = LlamaGenInference(model_size="700M")
+
     # Try to load models
     print("Setting up models...")
     if not generator.setup_models():
@@ -283,47 +321,76 @@ def main():
         print("1. vq_ds16_t2i.pt")
         print("2. t2i_XL_stage1_256.pt")
         return
-    
-    # Test prompts for adversarial research
-    test_prompts = [
-        "a cat sitting on a red chair",
-        "a beautiful sunset over mountains", 
-        "a futuristic cityscape at night",
-        "a portrait photo of a kangaroo wearing an orange hoodie"
-    ]
-    
+
     print(f"\n{'='*60}")
     print("Starting image generation...")
-    
-    # Generate images
-    for i, prompt in enumerate(test_prompts):
-        print(f"\n[{i+1}/{len(test_prompts)}] Processing: '{prompt}'")
+
+    # Generate images and store in database
+    for i, prompt in enumerate(prompts_to_process):
+        print(f"\n[{i+1}/{len(prompts_to_process)}] Processing: '{prompt}'")
         print("-" * 50)
-        
+
         start_time = time.time()
         images = generator.generate_image(prompt, num_samples=1)
         total_time = time.time() - start_time
-        
+
         if images:
             # Ensure output directory exists
-            import os
-            output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "images", "step1_baseline")
+            output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "outputs", "step1_inference")
             os.makedirs(output_dir, exist_ok=True)
-            
-            # Save generated images
+
+            # Save generated images and store in database
             for j, img in enumerate(images):
                 # Clean filename
                 clean_prompt = ''.join(c for c in prompt if c.isalnum() or c in ' -_')[:30]
                 clean_prompt = clean_prompt.replace(' ', '_')
                 filename = os.path.join(output_dir, f"baseline_{i+1}_{clean_prompt}_{j}.png")
                 img.save(filename)
+
+                # Store in database
+                config_params = {
+                    "model_size": generator.model_size,
+                    "image_size": generator.image_size,
+                    "cfg_scale": generator.cfg_scale,
+                    "temperature": generator.temperature,
+                    "top_k": generator.top_k,
+                    "top_p": generator.top_p
+                }
+
+                result_id = db.store_inference_result(
+                    prompt=prompt,
+                    image_path=filename,
+                    generation_time=total_time,
+                    model_size=generator.model_size,
+                    config_params=config_params,
+                    success=True
+                )
+
                 print(f"Saved: {filename} (took {total_time:.2f}s total)")
+                print(f"Database ID: {result_id}")
         else:
-            print(f"Failed to generate image for prompt: '{prompt}'")
-    
+            # Store failed generation in database
+            result_id = db.store_inference_result(
+                prompt=prompt,
+                image_path="",
+                generation_time=total_time,
+                model_size=generator.model_size,
+                success=False
+            )
+            print(f"Failed to generate image for prompt: '{prompt}' (Database ID: {result_id})")
+
+    # Print database summary
     print(f"\n{'='*60}")
     print("Step 1 (LlamaGen Inference) completed successfully!")
-    print("Generated images saved in current directory.")
+
+    # Get and display results from database
+    results = db.get_inference_results()
+    print(f"Database contains {len(results)} inference results:")
+    for result in results:
+        status = "✓" if result['success'] else "✗"
+        print(f"  {status} '{result['prompt_text'][:40]}...' ({result['generation_time']:.2f}s)")
+
+    print(f"Database location: {db.db_path}")
 
 if __name__ == "__main__":
     main()

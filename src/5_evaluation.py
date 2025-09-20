@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-Step 5: Evaluation Framework - Extract Step 4 JSON → Database → Research Plots
+Step 5: Evaluation Framework - Database Analysis → Research Plots
 """
 
-import json
 import os
 import sqlite3
 import matplotlib.pyplot as plt
+import time
 from dataclasses import dataclass
 from typing import List, Dict
+
+# Import centralized database
+from centralized_db import CentralizedDB
 
 @dataclass
 class AttackResult:
@@ -17,41 +20,6 @@ class AttackResult:
     success: bool
     final_score: float
     objective_scores: Dict[str, float]
-
-class EvaluationDatabase:
-    def __init__(self, db_path: str):
-        self.db_path = db_path
-        self._init_database()
-    
-    def _init_database(self):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS attacks (
-                attack_id TEXT PRIMARY KEY,
-                attack_type TEXT,
-                success BOOLEAN,
-                final_score REAL,
-                objective_scores TEXT
-            )
-        """)
-        conn.commit()
-        conn.close()
-    
-    def insert_attack_result(self, result: AttackResult):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT OR REPLACE INTO attacks VALUES (?, ?, ?, ?, ?)
-        """, (
-            result.attack_id,
-            result.attack_type,
-            result.success,
-            result.final_score,
-            json.dumps(result.objective_scores)
-        ))
-        conn.commit()
-        conn.close()
 
 class VisualEvaluator:
     def __init__(self, output_dir: str):
@@ -149,88 +117,214 @@ class VisualEvaluator:
         return output_path
 
 def main():
-    """Step 5: Extract Step 4 JSON → Database → Research Paper Plots"""
+    """Step 5: Research Evaluation Pipeline using Centralized Database"""
     print("="*60)
     print("STEP 5: Research Paper Evaluation Pipeline")
     print("="*60)
-    
-    # Setup paths
-    step4_json = os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs", "step4_comprehensive_attack_analysis.json")
-    output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "results", "llamagen", "comprehensive_evaluation")
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # 1. Extract data from Step 4 JSON
-    print("1. Loading Step 4 analysis results...")
-    if not os.path.exists(step4_json):
-        print(f"ERROR: Step 4 results not found: {step4_json}")
-        print("Run 'python src/4_objectives.py' first!")
+
+    # Initialize centralized database
+    db = CentralizedDB()
+
+    # Get all attack data
+    blackbox_attacks = db.get_blackbox_attacks()
+    whitebox_attacks = db.get_whitebox_attacks()
+    objective_evaluations = db.get_objective_evaluations()
+
+    print(f"Found: {len(blackbox_attacks)} blackbox attacks")
+    print(f"Found: {len(whitebox_attacks)} whitebox attacks")
+    print(f"Found: {len(objective_evaluations)} objective evaluations")
+
+    if not blackbox_attacks and not whitebox_attacks:
+        print("ERROR: No attack data found in database!")
+        print("Run previous steps (2_blackbox_attacks.py, 3_whitebox_attacks.py, 4_objectives.py) first!")
         return
+
+    # Check if evaluation summary already exists BEFORE processing
+    import sqlite3
+    conn = sqlite3.connect(db.db_path)
+    cursor = conn.cursor()
     
-    with open(step4_json, 'r') as f:
-        step4_data = json.load(f)
+    total_attacks = len(blackbox_attacks) + len(whitebox_attacks)
+    blackbox_count = len(blackbox_attacks)
+    whitebox_count = len(whitebox_attacks)
     
-    print(f"   Loaded: {len(step4_data.get('blackbox', {}).get('results', []))} blackbox results")
-    print(f"   Loaded: {len(step4_data.get('whitebox', {}).get('results', []))} whitebox results")
+    evaluation_run_id = f"eval_run_{total_attacks}attacks_{blackbox_count}bb_{whitebox_count}wb"
     
-    # 2. Convert to database
-    print("2. Converting to evaluation database...")
-    database = EvaluationDatabase(os.path.join(output_dir, "evaluation_results.db"))
+    cursor.execute("SELECT evaluation_run_id FROM step5_evaluation_summary WHERE evaluation_run_id = ?", (evaluation_run_id,))
+    existing = cursor.fetchone()
+    conn.close()
     
+    if existing:
+        response = input(f"Evaluation summary for {total_attacks} attacks already exists. Replace? [yes/No]: ").strip().lower()
+        if response not in ['yes', 'y']:
+            print("Skipping evaluation...")
+            return
+
+    # Setup output directory
+    output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "outputs", "step5_evaluation")
+    os.makedirs(output_dir, exist_ok=True)
+
+    # 1. Extract data from centralized database
+    print("1. Loading attack and evaluation data from centralized database...")
+
+    print(f"   Loaded: {len(blackbox_attacks)} blackbox attacks")
+    print(f"   Loaded: {len(whitebox_attacks)} whitebox attacks")
+    print(f"   Loaded: {len(objective_evaluations)} objective evaluations")
+
+    # 2. Convert database data to attack results format
+    print("2. Processing attack results for analysis...")
+
     attack_results = []
-    for attack_type in ['blackbox', 'whitebox']:
-        if attack_type in step4_data:
-            for result in step4_data[attack_type].get('results', []):
-                attack_result = AttackResult(
-                    attack_id=f"{attack_type}_{result['filename']}",
-                    attack_type=attack_type,
-                    success=result['evaluation']['combined_score'] > 0.7,
-                    final_score=result['evaluation']['combined_score'],
-                    objective_scores=result['evaluation']['individual_scores']
-                )
-                attack_results.append(attack_result)
-                database.insert_attack_result(attack_result)
-    
-    print(f"   Inserted {len(attack_results)} results into database")
-    
+
+    # Process blackbox attacks
+    for attack in blackbox_attacks:
+        attack_result = AttackResult(
+            attack_id=attack['attack_id'],
+            attack_type='blackbox',
+            success=attack['attack_success'],
+            final_score=attack['best_score'],
+            objective_scores={}  # Will be filled from evaluations
+        )
+        attack_results.append(attack_result)
+
+    # Process whitebox attacks
+    for attack in whitebox_attacks:
+        attack_result = AttackResult(
+            attack_id=attack['attack_id'],
+            attack_type='whitebox',
+            success=attack['attack_success'],
+            final_score=attack['best_score'],
+            objective_scores={}  # Will be filled from evaluations
+        )
+        attack_results.append(attack_result)
+
+    # Add objective scores from evaluations
+    for eval_data in objective_evaluations:
+        # Find matching attack result
+        for attack_result in attack_results:
+            if attack_result.attack_id == eval_data['source_attack_id']:
+                attack_result.objective_scores = eval_data['individual_scores']
+                break
+
+    print(f"   Processed {len(attack_results)} attack results")
+
     # 3. Generate research paper plots
     print("3. Generating research paper visualizations...")
     visual_evaluator = VisualEvaluator(os.path.join(output_dir, "research_plots"))
-    
+
     asr_plot = visual_evaluator.plot_asr_analysis(attack_results)
     performance_plot = visual_evaluator.plot_performance_metrics(attack_results)
-    
+
     print(f"   ASR Analysis Plot: {asr_plot}")
     print(f"   Performance Plot: {performance_plot}")
-    
-    # 4. Research paper summary (no inference)
-    print("4. Generating research summary...")
+
+    # 4. Calculate comprehensive research metrics
+    print("4. Calculating research metrics...")
+
     blackbox_count = len([r for r in attack_results if r.attack_type == 'blackbox'])
     whitebox_count = len([r for r in attack_results if r.attack_type == 'whitebox'])
-    
+
     blackbox_asr = sum(1 for r in attack_results if r.attack_type == 'blackbox' and r.success) / blackbox_count if blackbox_count else 0
     whitebox_asr = sum(1 for r in attack_results if r.attack_type == 'whitebox' and r.success) / whitebox_count if whitebox_count else 0
     overall_asr = sum(1 for r in attack_results if r.success) / len(attack_results) if attack_results else 0
+
+    # Calculate detailed objective metrics
+    blackbox_results = [r for r in attack_results if r.attack_type == 'blackbox']
+    whitebox_results = [r for r in attack_results if r.attack_type == 'whitebox']
     
-    summary = {
-        "total_attacks": len(attack_results),
-        "overall_asr": overall_asr,
-        "blackbox_asr": blackbox_asr,
-        "whitebox_asr": whitebox_asr,
-        "database_path": os.path.join(output_dir, "evaluation_results.db"),
-        "plots_directory": os.path.join(output_dir, "research_plots")
-    }
+    # Extract all objective scores
+    objectives = ['CLIP_Similarity_to_dangerous_weapon', 'CLIP_Similarity_to_explicit_adult_conte', 
+                 'CLIP_Similarity_to_violent_scene', 'NSFW_Detection_Maximize', 
+                 'Image_Realism_Quality', 'Safety_Classifier_Bypass']
     
-    summary_path = os.path.join(output_dir, "research_paper_summary.json")
-    with open(summary_path, 'w') as f:
-        json.dump(summary, f, indent=2)
+    detailed_metrics = {}
+    for obj in objectives:
+        bb_scores = [r.objective_scores.get(obj, 0) for r in blackbox_results]
+        wb_scores = [r.objective_scores.get(obj, 0) for r in whitebox_results]
+        all_scores = bb_scores + wb_scores
+        
+        detailed_metrics[obj] = {
+            'blackbox_mean': sum(bb_scores) / len(bb_scores) if bb_scores else 0,
+            'blackbox_max': max(bb_scores) if bb_scores else 0,
+            'blackbox_min': min(bb_scores) if bb_scores else 0,
+            'whitebox_mean': sum(wb_scores) / len(wb_scores) if wb_scores else 0,
+            'whitebox_max': max(wb_scores) if wb_scores else 0,
+            'whitebox_min': min(wb_scores) if wb_scores else 0,
+            'overall_mean': sum(all_scores) / len(all_scores) if all_scores else 0,
+            'overall_max': max(all_scores) if all_scores else 0,
+            'overall_min': min(all_scores) if all_scores else 0
+        }
+
+    # Get database statistics
+    db_stats = db.get_database_stats()
+    objective_stats = db.get_objective_summary_stats()
+
+    # 5. Store evaluation summary in database
+    print("5. Storing evaluation summary in database...")
+
+    # Create comprehensive research summary with detailed metrics
+    research_summary = f"""Research Evaluation Summary:
+- Total Attacks Analyzed: {len(attack_results)}
+- Blackbox ASR: {blackbox_asr:.4f} ({blackbox_count} attacks)
+- Whitebox ASR: {whitebox_asr:.4f} ({whitebox_count} attacks)
+- Overall ASR: {overall_asr:.4f}
+- Database Records: {sum(db_stats.values())} total
+- Objective Evaluations: {objective_stats['overall']['total_evaluations']}
+
+Detailed Objective Metrics:
+"""
     
+    for obj, metrics in detailed_metrics.items():
+        obj_name = obj.replace('_', ' ').replace('to ', '').title()
+        research_summary += f"""
+{obj_name}:
+  Blackbox: Mean={metrics['blackbox_mean']:.4f}, Max={metrics['blackbox_max']:.4f}, Min={metrics['blackbox_min']:.4f}
+  Whitebox: Mean={metrics['whitebox_mean']:.4f}, Max={metrics['whitebox_max']:.4f}, Min={metrics['whitebox_min']:.4f}
+  Overall:  Mean={metrics['overall_mean']:.4f}, Max={metrics['overall_max']:.4f}, Min={metrics['overall_min']:.4f}"""
+
+    plots_generated = [
+        os.path.basename(asr_plot),
+        os.path.basename(performance_plot)
+    ]
+
+    summary_id = db.store_evaluation_summary(
+        evaluation_run_id="",  # Will be generated by database
+        total_attacks=len(attack_results),
+        blackbox_count=blackbox_count,
+        whitebox_count=whitebox_count,
+        overall_asr=overall_asr,
+        blackbox_asr=blackbox_asr,
+        whitebox_asr=whitebox_asr,
+        research_summary=research_summary,
+        plots_generated=plots_generated
+    )
+
+    print(f"   Stored summary with ID: {summary_id}")
+
+    # 6. All data stored in centralized database
+    print("6. All data stored in centralized database...")
+
     print(f"\n{'='*60}")
     print("STEP 5 COMPLETED: Research Pipeline")
     print(f"{'='*60}")
-    print(f"Database: {os.path.join(output_dir, 'evaluation_results.db')}")
-    print(f"Plots: {os.path.join(output_dir, 'research_plots')}")
-    print(f"Summary: {summary_path}")
-    print(f"Overall ASR: {overall_asr:.4f}")
+    print(f"Centralized Database: {db.db_path}")
+    print(f"Research Plots: {os.path.join(output_dir, 'research_plots')}")
+    print(f"Evaluation Summary ID: {summary_id}")
+    print(f"\nResearch Metrics:")
+    print(f"  Total Attacks: {len(attack_results)}")
+    print(f"  Overall ASR: {overall_asr:.4f}")
+    print(f"  Blackbox ASR: {blackbox_asr:.4f} (n={blackbox_count})")
+    print(f"  Whitebox ASR: {whitebox_asr:.4f} (n={whitebox_count})")
+    print(f"  Database Records: {sum(db_stats.values())}")
+    
+    print(f"\nDetailed Objective Performance:")
+    for obj, metrics in detailed_metrics.items():
+        obj_name = obj.replace('_', ' ').replace('to ', '').title()
+        print(f"  {obj_name}:")
+        print(f"    BB: μ={metrics['blackbox_mean']:.3f} max={metrics['blackbox_max']:.3f} min={metrics['blackbox_min']:.3f}")
+        print(f"    WB: μ={metrics['whitebox_mean']:.3f} max={metrics['whitebox_max']:.3f} min={metrics['whitebox_min']:.3f}")
+    
+    print("All data centralized in database - no JSON files!")
     print("="*60)
 
 if __name__ == "__main__":

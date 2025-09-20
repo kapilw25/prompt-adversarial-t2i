@@ -21,6 +21,9 @@ inference_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(inference_module)
 LlamaGenInference = inference_module.LlamaGenInference
 
+# Import centralized database
+from centralized_db import CentralizedDB
+
 class BlackBoxAttacker:
     def __init__(self, 
                  image_generator: LlamaGenInference,
@@ -277,92 +280,142 @@ class BlackBoxAttacker:
         elif any(phrase in prompt_lower for phrase in ["fictional", "movie", "game"]):
             return "context_manipulation"
     
-    def random_search(self, initial_prompt: str, target_text: str, max_iterations: int = 50, attack_name: str = "blackbox") -> Dict:
+    def random_search(self, initial_prompt: str, target_text: str, max_iterations: int = 50, attack_name: str = "blackbox", db: CentralizedDB = None) -> Dict:
         """
-        Perform random search optimization.
-        
+        Perform random search optimization with database logging.
+
         Args:
             initial_prompt: Starting prompt
             target_text: Target concept to optimize for
             max_iterations: Maximum search iterations
-            
+            attack_name: Name for this attack run
+            db: Centralized database instance
+
         Returns:
             Best result dictionary
         """
+        # Initialize database if not provided
+        if db is None:
+            db = CentralizedDB()
+
         print(f"Starting random search attack...")
+        print(f"Attack name: {attack_name}")
         print(f"Initial prompt: '{initial_prompt}'")
         print(f"Target concept: '{target_text}'")
         print(f"Max iterations: {max_iterations}")
-        
+
         best_result = self.evaluate_prompt(initial_prompt, target_text)
         print(f"Initial score: {best_result['score']:.4f}")
-        
-        results_log = [best_result.copy()]
-        
+
+        best_image_path = ""
+        iteration_data = []
+
         for iteration in range(max_iterations):
             print(f"\nIteration {iteration + 1}/{max_iterations}")
-            
+
             # Generate progressively evolved adversarial prompt
             mutated_prompt = self.mutate_prompt(initial_prompt, target_text, iteration, max_iterations)
             print(f"Trying: '{mutated_prompt[:60]}{'...' if len(mutated_prompt) > 60 else ''}'")
-            
+
             # Evaluate mutated prompt
             result = self.evaluate_prompt(mutated_prompt, target_text)
-            
+
             # Evaluate attack stealth
             stealth_metrics = self.evaluate_attack_stealth(initial_prompt, mutated_prompt)
-            result.update(stealth_metrics)
-            
-            results_log.append(result.copy())
-            
+
+            # Determine attack stage
+            evolution_stage = iteration / max_iterations
+            if evolution_stage < 0.3:
+                stage_name = "steganographic"
+            elif evolution_stage < 0.6:
+                stage_name = "contextual"
+            elif evolution_stage < 0.8:
+                stage_name = "social_engineering"
+            else:
+                stage_name = "jailbreaking"
+
+            # Store iteration data for later (after attack_id is assigned)
+            if not result["error"]:
+                iteration_data.append({
+                    'iteration_num': iteration + 1,
+                    'prompt_text': mutated_prompt,
+                    'clip_score': result["score"],
+                    'stealth_score': stealth_metrics.get("stealth_score", 0.0),
+                    'attack_stage': stage_name,
+                    'mutation_type': stealth_metrics.get("attack_type", "unknown")
+                })
+
             if result["error"]:
                 print(f"Error: {result['error']}")
                 continue
-            
+
             print(f"Score: {result['score']:.4f}")
-            
+            print(f"Stealth: {stealth_metrics.get('stealth_score', 0.0):.4f}")
+
             # Update best if improved
             if result["score"] > best_result["score"]:
                 best_result = result.copy()
+                best_result.update(stealth_metrics)
                 print(f"NEW BEST! Score: {best_result['score']:.4f}")
-                
+
                 # Save best image
                 if best_result["image"]:
-                    output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "images", "step2_attacks")
+                    output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "outputs", "step2_blackbox")
                     os.makedirs(output_dir, exist_ok=True)
-                    filename = os.path.join(output_dir, f"{attack_name}_llamagen_best_iter{iteration+1}_score{best_result['score']:.3f}.png")
+                    filename = os.path.join(output_dir, f"{attack_name}_best_iter{iteration+1}_score{best_result['score']:.3f}.png")
                     best_result["image"].save(filename)
+                    best_image_path = filename
                     print(f"Saved best image: {filename}")
-            
+
             # Early stopping if target reached
             if best_result["score"] >= self.target_similarity_threshold:
                 print(f"Target similarity {self.target_similarity_threshold} reached!")
                 break
-        
+
+        # Store main attack result in database
+        attack_success = best_result["score"] >= self.target_similarity_threshold
+        attack_id = db.store_blackbox_attack(
+            attack_id="",  # Will be generated by database
+            scenario_name=attack_name,
+            initial_prompt=initial_prompt,
+            target_concept=target_text,
+            best_score=best_result["score"],
+            best_prompt=best_result.get("prompt", initial_prompt),
+            best_image_path=best_image_path,
+            total_iterations=min(iteration + 1, max_iterations),
+            success_threshold=self.target_similarity_threshold,
+            attack_success=attack_success,
+            stealth_metrics=best_result.get("stealth_metrics", {}),
+            attack_type="blackbox"
+        )
+
+        print(f"\nAttack stored in database with ID: {attack_id}")
+        print(f"Attack success: {attack_success}")
+
+        # Now store all iterations with the assigned attack_id
+        for iter_data in iteration_data:
+            db.store_blackbox_iteration(
+                attack_id=attack_id,
+                **iter_data
+            )
+
         return {
+            "attack_id": attack_id,
             "best_result": best_result,
-            "results_log": results_log,
-            "iterations": min(iteration + 1, max_iterations)
+            "iterations": min(iteration + 1, max_iterations),
+            "attack_success": attack_success,
+            "database_stored": True
         }
 
 def main():
-    """Demo black-box attack"""
+    """Demo black-box attack with database storage"""
     print("="*60)
     print("STEP 2: Black-box Attack on Text-to-Image Generation")
     print("="*60)
-    
-    # Initialize LlamaGen (assuming step1 is working)
-    print("Initializing LlamaGen generator...")
-    generator = LlamaGenInference(model_size="700M")
-    
-    if not generator.setup_models():
-        print("Failed to setup LlamaGen models!")
-        return
-    
-    # Initialize attacker
-    print("Initializing black-box attacker...")
-    attacker = BlackBoxAttacker(generator)
-    
+
+    # Initialize centralized database
+    db = CentralizedDB()
+
     # Attack scenarios
     attack_scenarios = [
         {
@@ -381,54 +434,98 @@ def main():
             "description": "Style transfer attack"
         }
     ]
+
+    # Check which scenarios need processing BEFORE loading models
+    import sqlite3
+    conn = sqlite3.connect(db.db_path)
+    cursor = conn.cursor()
     
+    scenarios_to_process = []
+    for scenario in attack_scenarios:
+        attack_type = scenario['description'].lower().replace(' ', '_')
+        scenario_name = f"blackbox_{attack_type}"
+        
+        cursor.execute("SELECT attack_id FROM step2_blackbox_attacks WHERE scenario_name = ?", (scenario_name,))
+        existing = cursor.fetchone()
+        
+        if existing:
+            response = input(f"Scenario '{scenario_name}' already exists. Replace? [yes/No]: ").strip().lower()
+            if response in ['yes', 'y']:
+                scenarios_to_process.append(scenario)
+            else:
+                print("Skipping scenario...")
+        else:
+            scenarios_to_process.append(scenario)
+    
+    conn.close()
+    
+    if not scenarios_to_process:
+        print("No scenarios to process. Exiting...")
+        return
+
+    # Initialize LlamaGen only if needed
+    print("Initializing LlamaGen generator...")
+    generator = LlamaGenInference(model_size="700M")
+
+    if not generator.setup_models():
+        print("Failed to setup LlamaGen models!")
+        return
+
+    # Initialize attacker
+    print("Initializing black-box attacker...")
+    attacker = BlackBoxAttacker(generator)
+
+    attack_ids = []
+
     # Run attacks
-    for i, scenario in enumerate(attack_scenarios):
+    for i, scenario in enumerate(scenarios_to_process):
         print(f"\n{'='*40}")
         print(f"ATTACK SCENARIO {i+1}: {scenario['description']}")
         print(f"{'='*40}")
-        
+
         attack_type = scenario['description'].lower().replace(' ', '_')
         result = attacker.random_search(
             initial_prompt=scenario["initial_prompt"],
             target_text=scenario["target_concept"],
             max_iterations=20,  # Reduced for demo
-            attack_name=f"blackbox_{attack_type}"
+            attack_name=f"blackbox_{attack_type}",
+            db=db
         )
-        
+
+        if result.get("skipped"):
+            print(f"Scenario skipped by user")
+            continue
+
+        attack_ids.append(result["attack_id"])
+
         print(f"\nFinal Results:")
+        print(f"Attack ID: {result['attack_id']}")
         print(f"Best score: {result['best_result']['score']:.4f}")
-        print(f"Best prompt: '{result['best_result']['prompt']}'")
+        print(f"Best prompt: '{result['best_result'].get('prompt', 'N/A')}'")
         print(f"Total iterations: {result['iterations']}")
-        
-        # Save attack log with detailed metrics
-        logs_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs")
-        os.makedirs(logs_dir, exist_ok=True)
-        # Create descriptive filename
-        attack_type = scenario['description'].lower().replace(' ', '_')
-        log_filename = os.path.join(logs_dir, f"blackbox_llamagen_{attack_type}_scenario_{i+1}_log.txt")
-        with open(log_filename, "w") as f:
-            f.write(f"Attack Scenario {i+1}: {scenario['description']}\n")
-            f.write(f"Initial: '{scenario['initial_prompt']}'\n")
-            f.write(f"Target: '{scenario['target_concept']}'\n")
-            f.write(f"Best Score: {result['best_result']['score']:.4f}\n")
-            f.write(f"Best Prompt: '{result['best_result']['prompt']}'\n")
-            f.write(f"Iterations: {result['iterations']}\n\n")
-            
-            f.write("Detailed Iteration Log:\n")
-            for j, log_entry in enumerate(result['results_log']):
-                if not log_entry.get("error"):
-                    score = log_entry['score']
-                    prompt = log_entry.get('prompt', 'N/A')
-                    stealth = log_entry.get('stealth_score', 0.0)
-                    attack_type = log_entry.get('attack_type', 'unknown')
-                    f.write(f"Iter {j+1}: CLIP_Score={score:.4f}, Stealth={stealth:.4f}, Type={attack_type} - '{prompt}'\n")
-        
-        print(f"Attack log saved: {log_filename}")
-    
+        print(f"Attack success: {result['attack_success']}")
+
+    # Print database summary
     print(f"\n{'='*60}")
     print("Step 2 (Black-box Attack) completed!")
-    print("Generated adversarial prompts and attack logs.")
+    print(f"{'='*60}")
+
+    # Show database statistics
+    blackbox_attacks = db.get_blackbox_attacks()
+    print(f"Database contains {len(blackbox_attacks)} black-box attacks:")
+
+    for attack in blackbox_attacks:
+        status = "✓" if attack['attack_success'] else "✗"
+        print(f"  {status} {attack['attack_id']}: {attack['best_score']:.4f} ({attack['total_iterations']} iterations)")
+
+    # Show iteration details for latest attacks
+    print(f"\nIteration details for this run:")
+    for attack_id in attack_ids:
+        iterations = db.get_blackbox_iterations(attack_id)
+        print(f"  {attack_id}: {len(iterations)} iterations logged")
+
+    print(f"\nDatabase location: {db.db_path}")
+    print("All attack data stored in centralized database (no JSON files).")
     print("="*60)
 
 if __name__ == "__main__":
